@@ -76,11 +76,37 @@ class TestTranslations(unittest.TestCase):
             self.assertIn(key, TEXT["en"])
             self.assertIn(key, TEXT["fa"])
         self.assertIn("هیچ فایلی حذف نمی‌شود", tr("fa", "confirm_moves_safety_1"))
+        for key in ("ok", "wait_for_current", "move_preview_empty", "operation_error", "move_none", "undo_partial"):
+            self.assertIn(key, TEXT["en"])
+            self.assertIn(key, TEXT["fa"])
+
+
+    def test_rtl_label_wraps_logical_text_before_visual_shaping(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from filepilot.app import FilePilotApp
+
+        app = FilePilotApp.__new__(FilePilotApp)
+        app.language = "fa"
+        fake_reshaper = SimpleNamespace(reshape=lambda value: value)
+        def fake_bidi(value, base_dir=None):
+            return f"[{value}]"
+        with patch("filepilot.app.RTL_AVAILABLE", True), \
+             patch("filepilot.app.arabic_reshaper", fake_reshaper), \
+             patch("filepilot.app.bidi_get_display", fake_bidi):
+            rendered, wrap_length = app._label_text(
+                "پیش از جابه‌جایی فایل‌های پیشنهادی، پیش‌نمایش را کامل بررسی کنید.",
+                120, 10,
+            )
+        self.assertEqual(wrap_length, 0)
+        lines = rendered.splitlines()
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(all(line.startswith("[") and line.endswith("]") for line in lines))
 
     def test_ui_version_is_consistent(self):
         from filepilot.core import APP_VERSION
-        self.assertEqual(APP_VERSION, "1.0.6")
-        self.assertIn("۱.۰.۶", tr("fa", "version"))
+        self.assertEqual(APP_VERSION, "1.0.7")
+        self.assertIn("۱.۰.۷", tr("fa", "version"))
 
     def test_rtl_organizer_and_confirmation_copy_is_short(self):
         keys = (

@@ -8,8 +8,9 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 from datetime import datetime
+import textwrap
 
 from .core import (
     APP_VERSION,
@@ -21,10 +22,11 @@ from .core import (
     export_html,
     export_json,
     format_bytes,
+    has_undoable_organization,
     scan_directory,
     undo_latest_organization,
 )
-from .i18n import LANGUAGES, display_text, tr
+from .i18n import LANGUAGES, contains_rtl_characters, display_text, tr
 
 try:
     import arabic_reshaper
@@ -166,9 +168,10 @@ class FilePilotApp:
         name_row.grid(row=0, column=name_col, sticky="se" if rtl else "sw")
         tk.Label(name_row, text="FILE", bg=BG, fg=TEXT, font=("Segoe UI", 22, "bold")).pack(side="left")
         tk.Label(name_row, text="PILOT", bg=BG, fg=MINT, font=("Segoe UI", 22, "bold")).pack(side="left")
-        tagline = tk.Label(header, text=self._display(self.t("tagline")), bg=BG, fg=MUTED,
+        tagline_text, tagline_wrap = self._label_text(self.t("tagline"), 360, 9)
+        tagline = tk.Label(header, text=tagline_text, bg=BG, fg=MUTED,
                            font=("Segoe UI", 9), anchor="e" if rtl else "w",
-                           justify="right" if rtl else "left", wraplength=360)
+                           justify="right" if rtl else "left", wraplength=tagline_wrap)
         tagline.grid(row=1, column=name_col, sticky="ne" if rtl else "nw", pady=(0, 2))
 
         controls = tk.Frame(header, bg=BG)
@@ -196,6 +199,23 @@ class FilePilotApp:
             action.configure(state="disabled", disabledforeground=BG)
         self._widget_refs["header_action"] = action
 
+    @staticmethod
+    def _compact_sidebar_path(path: str, max_chars: int = 30) -> str:
+        """Show a readable tail of a local path in the narrow sidebar only."""
+        normalized = str(path).replace("/", "\\")
+        if len(normalized) <= max_chars:
+            return normalized
+        parts = [part for part in normalized.split("\\") if part]
+        if len(parts) >= 3:
+            tail = "\\".join(parts[-2:])
+            drive = parts[0] if parts[0].endswith(":") else ""
+            compact = f"{drive}\\…\\{tail}" if drive else f"…\\{tail}"
+            if len(compact) <= max_chars + 3:
+                return compact
+            last = parts[-1]
+            return f"…\\{last}" if len(last) <= max_chars - 2 else f"…{last[-(max_chars - 1):]}"
+        return f"…{normalized[-(max_chars - 1):]}"
+
     def _build_sidebar(self, parent: tk.Frame, side_column: int = 0, side_padx: tuple[int, int] = (18, 14)) -> None:
         side = tk.Frame(parent, bg=PANEL, width=226, highlightbackground=BORDER, highlightthickness=1)
         side.grid(row=0, column=side_column, sticky="ns", padx=side_padx, pady=(12, 10))
@@ -204,21 +224,24 @@ class FilePilotApp:
         workspace_label = self._label(side, self.t("workspace").upper(), color=MUTED, size=9, bold=True)
         workspace_label.pack(fill="x", anchor=anchor, padx=18, pady=(22, 12))
         nav_items = [
-            ("dashboard", "▦", "dashboard"),
-            ("duplicates", "⧉", "duplicates"),
-            ("organizer", "⇄", "organizer"),
-            ("reports", "▤", "reports"),
+            ("dashboard", "dashboard"),
+            ("duplicates", "duplicates"),
+            ("organizer", "organizer"),
+            ("reports", "reports"),
         ]
-        for page, glyph, label_key in nav_items:
+        for page, label_key in nav_items:
             selected = page == self.page
+            # Keep each localized label pure RTL; mixing icon glyphs into the
+            # same bidi string can move both the icon and words on Windows.
             btn = tk.Button(
-                side, text=self._display(f"  {glyph}    {self.t(label_key)}"),
+                side, text=self._display(self.t(label_key)),
                 command=lambda p=page: self.go_page(p),
                 bg="#1D304A" if selected else PANEL, fg=MINT if selected else TEXT,
                 activebackground="#1D304A", activeforeground=MINT,
                 font=("Segoe UI", 10, "bold" if selected else "normal"),
                 relief="flat", bd=0, anchor=anchor, justify="right" if self.language == "fa" else "left",
-                padx=8, pady=12, cursor="hand2",
+                padx=12, pady=12, cursor="hand2",
+                state="disabled" if self.busy else "normal",
             )
             btn.pack(fill="x", padx=10, pady=3)
         tk.Frame(side, bg=BORDER, height=1).pack(fill="x", padx=16, pady=(20, 15))
@@ -226,8 +249,10 @@ class FilePilotApp:
         selected_label.pack(fill="x", anchor=anchor, padx=18, pady=(0, 7))
         if self.selected_root:
             # Keep real paths in native LTR form so users can read/copy them accurately.
-            folder_label = tk.Label(side, text=self.selected_root, bg=PANEL, fg=TEXT,
-                                    font=("Segoe UI", 9), anchor="nw", justify="left", wraplength=185)
+            folder_label = tk.Label(
+                side, text=self._compact_sidebar_path(self.selected_root), bg=PANEL, fg=TEXT,
+                font=("Segoe UI", 9), anchor="nw", justify="left", wraplength=0,
+            )
         else:
             folder_label = tk.Label(side, text=self._display(self.t("no_folder")), bg=PANEL, fg=TEXT,
                                     font=("Segoe UI", 9), anchor="ne" if self.language == "fa" else "nw",
@@ -278,15 +303,42 @@ class FilePilotApp:
         else:
             self._page_reports()
 
+    def _label_text(self, value: object, wrap: int, size: int) -> tuple[str, int]:
+        """Prepare label text by wrapping logical RTL text before visual shaping.
+
+        Tk wraps pixels after receiving the visually reordered bidi string. That
+        can split Persian sentences in the wrong visual order. For RTL labels,
+        wrap the original logical words first, shape each line independently,
+        and disable Tk's second wrapping pass.
+        """
+        text = str(value)
+        if self.language != "fa" or not RTL_AVAILABLE or not contains_rtl_characters(text) or wrap <= 0:
+            return self._display(text), wrap
+        char_width = max(6.0, size * 0.72)
+        max_chars = max(16, int(wrap / char_width))
+        visual_lines: list[str] = []
+        for logical_line in text.splitlines() or [""]:
+            if not logical_line:
+                visual_lines.append("")
+                continue
+            chunks = textwrap.wrap(
+                logical_line, width=max_chars, break_long_words=False,
+                break_on_hyphens=False, replace_whitespace=False,
+                drop_whitespace=True,
+            ) or [logical_line]
+            visual_lines.extend(self._display(chunk) for chunk in chunks)
+        return "\n".join(visual_lines), 0
+
     def _label(self, parent: tk.Widget, text: str, *, color: str = TEXT, size: int = 10,
                bold: bool = False, wrap: int = 0, **kwargs) -> tk.Label:
         raw = kwargs.pop("raw", False)
         default_justify = "right" if self.language == "fa" else "left"
         default_anchor = "e" if self.language == "fa" else "w"
-        label = tk.Label(parent, text=str(text) if raw else self._display(text), bg=kwargs.pop("bg", PANEL), fg=color,
+        label_text, label_wrap = (str(text), wrap) if raw else self._label_text(text, wrap, size)
+        label = tk.Label(parent, text=label_text, bg=kwargs.pop("bg", PANEL), fg=color,
                          font=("Segoe UI", size, "bold" if bold else "normal"),
                          justify=kwargs.pop("justify", default_justify), anchor=kwargs.pop("anchor", default_anchor),
-                         wraplength=wrap, **kwargs)
+                         wraplength=label_wrap, **kwargs)
         return label
 
     def _button(self, parent: tk.Widget, text: str, command, kind: str = "secondary", **kwargs) -> tk.Button:
@@ -476,11 +528,20 @@ class FilePilotApp:
             line.pack(fill="x", anchor=self._content_anchor(), pady=(0, 3 if index < 2 else 0))
         actions = tk.Frame(self.workspace, bg=BG)
         actions.grid(row=3, column=0, sticky="ew", pady=(0, 10))
-        self._button(actions, self.t("make_preview"), self.make_organize_preview, kind="secondary").pack(side="left", padx=(0, 7))
-        apply_button = self._button(actions, self.t("apply_moves"), self.apply_organization, kind="primary")
-        apply_button.pack(side="left", padx=(0, 7))
-        self._button(actions, self.t("undo_last"), self.undo_organization, kind="danger").pack(side="left")
-        self._label(actions, f"{self.t('plan_count')}: {len(self.organize_plan):,}", bg=BG, color=MINT, size=9, bold=True).pack(side="right")
+        button_state = "disabled" if self.busy else "normal"
+        action_side = "right" if self.language == "fa" else "left"
+        preview_button = self._button(actions, self.t("make_preview"), self.make_organize_preview,
+                                      kind="secondary", state=button_state)
+        preview_button.pack(side=action_side, padx=(0, 7))
+        apply_button = self._button(actions, self.t("apply_moves"), self.apply_organization,
+                                    kind="primary", state=button_state)
+        apply_button.pack(side=action_side, padx=(0, 7))
+        undo_button = self._button(actions, self.t("undo_last"), self.undo_organization,
+                                   kind="danger", state=button_state)
+        undo_button.pack(side=action_side)
+        plan_text = f"{self.t('plan_count')}: {len(self.organize_plan):,}"
+        self._label(actions, plan_text, bg=BG, color=MINT, size=9, bold=True).pack(
+            side="left" if self.language == "fa" else "right")
 
         if not self.organize_plan:
             empty = tk.Frame(self.workspace, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
@@ -514,7 +575,7 @@ class FilePilotApp:
         tree = self._tree(table_wrap, organizer_columns, height=13)
         self._widget_refs["organize_tree"] = tree
         for i, item in enumerate(self.organize_plan):
-            row_values = (self._display(self._category_name(item.category)), self._display(Path(item.source).name),
+            row_values = (self._display(self._category_name(item.category)), self._display(Path(str(item.source).replace("\\", "/")).name),
                           format_bytes(item.size), item.source, item.destination)
             if self.language == "fa":
                 row_values = tuple(reversed(row_values))
@@ -560,7 +621,7 @@ class FilePilotApp:
         for code, label in LANGUAGES.items():
             if self._display(label) == selected:
                 if code == "fa" and not RTL_AVAILABLE:
-                    messagebox.showwarning("FilePilot", "Persian right-to-left support is missing. Run install_dependencies.bat, then restart FilePilot.", parent=self.root)
+                    self._message_dialog("FilePilot", "Persian right-to-left support is missing. Run install_dependencies.bat, then restart FilePilot.", kind="warning")
                     self.language = "en"
                 else:
                     self.language = code
@@ -573,7 +634,7 @@ class FilePilotApp:
 
     def choose_folder(self) -> None:
         initial = self.selected_root if self.selected_root and Path(self.selected_root).is_dir() else str(Path.home())
-        folder = filedialog.askdirectory(title=self.t("select_folder"), initialdir=initial, mustexist=True)
+        folder = filedialog.askdirectory(title="Select a folder for FilePilot", initialdir=initial, mustexist=True)
         if not folder:
             return
         self.selected_root = str(Path(folder).resolve())
@@ -587,7 +648,7 @@ class FilePilotApp:
     def start_scan(self, silent: bool = False) -> None:
         if self.busy:
             if not silent:
-                messagebox.showinfo(self._display(self.t("app_title")), self._display(self.t("scan_running")), parent=self.root)
+                self._message_dialog(self.t("app_title"), self.t("scan_running"), kind="info")
             return
         if not self.selected_root or not Path(self.selected_root).is_dir():
             if not silent:
@@ -621,9 +682,13 @@ class FilePilotApp:
                 status.configure(text=self._display(self.t("cancelled")))
 
     def make_organize_preview(self) -> None:
+        if self.busy:
+            self._message_dialog(self.t("working"), self.t("wait_for_current"), kind="warning")
+            return
         if not self.selected_root or not Path(self.selected_root).is_dir():
             self.choose_folder()
             if not self.selected_root:
+                self._message_dialog(self.t("app_title"), self.t("choose_first"), kind="info")
                 return
         try:
             self.organize_plan = build_organize_plan(self.selected_root)
@@ -631,8 +696,79 @@ class FilePilotApp:
             self.status_key = "status_ready"
             self.status_detail = f"{len(self.organize_plan)} moves previewed"
             self._render()
+            if not self.organize_plan:
+                self._message_dialog(self.t("organizer_no_moves_title"), self.t("move_preview_empty"), kind="info")
         except Exception as exc:
-            messagebox.showerror(self._display(self.t("status_error")), self._display(f"{self.t('scan_error')}\n{exc}"), parent=self.root)
+            self._message_dialog(self.t("status_error"), self.t("scan_error"), details=str(exc), kind="error")
+
+    def _message_dialog(
+        self,
+        title: str,
+        message: str,
+        *,
+        details: str | None = None,
+        kind: str = "info",
+    ) -> None:
+        """Show a consistent message dialog without native Windows RTL issues.
+
+        Translated text is rendered through the same label pipeline as the main
+        UI. Technical exception details and filesystem paths are kept in a
+        separate left-to-right text box, rather than mixing them into Persian.
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("FilePilot - Message")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.geometry("640x300" if not details else "720x430")
+        dialog.minsize(520, 250)
+        dialog.grab_set()
+
+        accent = RED if kind == "error" else AMBER if kind == "warning" else MINT
+        outer = tk.Frame(dialog, bg=BG, highlightbackground=BORDER, highlightthickness=1)
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+        header = tk.Frame(outer, bg=PANEL_ALT)
+        header.pack(fill="x")
+        tk.Label(header, text="!" if kind in {"error", "warning"} else "i", bg=accent, fg=BG,
+                 font=("Segoe UI", 12, "bold"), width=3, pady=8).pack(side="right", padx=(12, 8), pady=10)
+        self._label(header, title, bg=PANEL_ALT, color=TEXT, size=13, bold=True, wrap=520).pack(
+            side="right", fill="x", expand=True, padx=(0, 12), pady=10
+        )
+        body = tk.Frame(outer, bg=BG)
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+        self._label(body, message, bg=BG, color=TEXT, size=10, wrap=620 if details else 560).pack(
+            fill="x", anchor=self._content_anchor(), pady=(0, 10)
+        )
+        if details:
+            technical = tk.Text(body, height=7, wrap="word", bg=PANEL, fg=MUTED,
+                                insertbackground=TEXT, relief="flat", bd=0,
+                                font=("Consolas", 9), padx=9, pady=8)
+            technical.pack(fill="both", expand=True)
+            technical.insert("1.0", str(details))
+            technical.configure(state="disabled")
+        buttons = tk.Frame(outer, bg=PANEL_ALT)
+        buttons.pack(fill="x", side="bottom")
+        def close() -> None:
+            try:
+                dialog.grab_release()
+            except tk.TclError:
+                pass
+            if dialog.winfo_exists():
+                dialog.destroy()
+        ok_button = self._button(buttons, self.t("ok"), close, kind="primary")
+        ok_button.pack(side="right", padx=14, pady=10)
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _event: close())
+        dialog.bind("<Return>", lambda _event: close())
+        dialog.update_idletasks()
+        try:
+            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dialog.winfo_width()) // 2)
+            y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dialog.winfo_height()) // 2)
+            dialog.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+        ok_button.focus_set()
+        dialog.wait_window()
 
     def _confirm_dialog(
         self,
@@ -678,7 +814,7 @@ class FilePilotApp:
         # wrapping happens after bidi shaping and can scramble long visual-order
         # strings, so translated sentences are deliberately concise.
         self._label(body, message, bg=BG, color=TEXT, size=10,
-                    wrap=0 if self.language == "fa" else 550).pack(
+                    wrap=550).pack(
             fill="x", anchor=self._content_anchor(), pady=(0, 14)
         )
 
@@ -710,7 +846,7 @@ class FilePilotApp:
 
         for line in safety_lines:
             self._label(body, line, bg=BG, color=MUTED, size=9,
-                        wrap=0 if self.language == "fa" else 550).pack(
+                        wrap=550).pack(
                 fill="x", anchor=self._content_anchor(), pady=2
             )
 
@@ -745,9 +881,11 @@ class FilePilotApp:
 
     def apply_organization(self) -> None:
         if self.busy:
+            self._message_dialog(self.t("working"), self.t("wait_for_current"), kind="warning")
             return
         if not self.organize_plan:
             self.make_organize_preview()
+            # The preview function already explains an empty/cancelled result.
             if not self.organize_plan:
                 return
         confirmed = self._confirm_dialog(
@@ -758,12 +896,16 @@ class FilePilotApp:
             safety_lines=(self.t("confirm_moves_safety_1"), self.t("confirm_moves_safety_2"), self.t("confirm_moves_safety_3")),
         )
         if not confirmed:
+            self.status_key = "status_ready"
+            self.status_detail = ""
+            self._render()
             return
         plan = list(self.organize_plan)
         self.busy = True
         self.busy_kind = "organize"
         self.cancel_event = threading.Event()
         self.status_key = "working"
+        self.status_detail = ""
         self._render()
 
         def worker() -> None:
@@ -776,6 +918,10 @@ class FilePilotApp:
 
     def undo_organization(self) -> None:
         if self.busy:
+            self._message_dialog(self.t("working"), self.t("wait_for_current"), kind="warning")
+            return
+        if not has_undoable_organization():
+            self._message_dialog(self.t("app_title"), self.t("undo_none"), kind="info")
             return
         if not self._confirm_dialog(
             self.t("confirm_title"), self.t("confirm_undo_message"),
@@ -785,6 +931,7 @@ class FilePilotApp:
         self.busy = True
         self.busy_kind = "undo"
         self.status_key = "working"
+        self.status_detail = ""
         self._render()
         def worker() -> None:
             try:
@@ -796,12 +943,12 @@ class FilePilotApp:
 
     def export_report(self, kind: str) -> None:
         if not self.report:
-            messagebox.showinfo(self._display(self.t("app_title")), self._display(self.t("export_before")), parent=self.root)
+            self._message_dialog(self.t("app_title"), self.t("export_before"), kind="info")
             return
         ext_map = {"csv": ".csv", "json": ".json", "html": ".html"}
         function_map = {"csv": export_csv, "json": export_json, "html": export_html}
         default_name = f"filepilot-report-{datetime.now().strftime('%Y%m%d-%H%M%S')}{ext_map[kind]}"
-        path = filedialog.asksaveasfilename(title=self.t("choose_report_path"), defaultextension=ext_map[kind],
+        path = filedialog.asksaveasfilename(title="Save FilePilot report", defaultextension=ext_map[kind],
                                             initialfile=default_name,
                                             filetypes=[(kind.upper() + " files", "*" + ext_map[kind]), ("All files", "*.*")],
                                             parent=self.root)
@@ -809,9 +956,9 @@ class FilePilotApp:
             return
         try:
             saved = function_map[kind](self.report, path)
-            messagebox.showinfo(self._display(self.t("export_success")), self._display(f"{self.t('export_success')}:\n{saved}"), parent=self.root)
+            self._message_dialog(self.t("export_success"), self.t("export_success"), details=str(saved), kind="info")
         except Exception as exc:
-            messagebox.showerror(self._display(self.t("export_failed")), self._display(f"{self.t('export_failed')}:\n{exc}"), parent=self.root)
+            self._message_dialog(self.t("export_failed"), self.t("export_failed"), details=str(exc), kind="error")
 
     def _selected_duplicate_path(self) -> str | None:
         tree = self._widget_refs.get("duplicate_tree")
@@ -827,7 +974,7 @@ class FilePilotApp:
     def copy_selected_duplicate_path(self) -> None:
         path = self._selected_duplicate_path()
         if not path:
-            messagebox.showinfo(self._display(self.t("app_title")), self._display(self.t("select_row")), parent=self.root)
+            self._message_dialog(self.t("app_title"), self.t("select_row"), kind="info")
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(path)
@@ -839,7 +986,7 @@ class FilePilotApp:
     def open_selected_duplicate_location(self) -> None:
         path = self._selected_duplicate_path()
         if not path:
-            messagebox.showinfo(self._display(self.t("app_title")), self._display(self.t("select_row")), parent=self.root)
+            self._message_dialog(self.t("app_title"), self.t("select_row"), kind="info")
             return
         directory = str(Path(path).parent)
         try:
@@ -850,7 +997,7 @@ class FilePilotApp:
             else:
                 subprocess.Popen(["xdg-open", directory])
         except Exception as exc:
-            messagebox.showerror(self._display(self.t("status_error")), self._display(str(exc)), parent=self.root)
+            self._message_dialog(self.t("status_error"), self.t("operation_error"), details=str(exc), kind="error")
 
     def _process_events(self) -> None:
         try:
@@ -898,7 +1045,14 @@ class FilePilotApp:
                     self.status_key = "status_done"
                     self.status_detail = self.t("move_partial").format(moved=moved, errors=errors) if errors else self.t("move_done").format(count=moved)
                     self._render()
-                    messagebox.showinfo(self._display(self.t("status_done")), self._display(self.status_detail), parent=self.root)
+                    if moved:
+                        summary = (self.t("move_partial").format(moved=moved, errors=errors)
+                                   if errors else self.t("move_done").format(count=moved))
+                    elif errors:
+                        summary = self.t("move_partial").format(moved=moved, errors=errors)
+                    else:
+                        summary = self.t("move_none")
+                    self._message_dialog(self.t("status_done"), summary, kind="info")
                     if moved:
                         self.start_scan(silent=True)
                 elif event == "undo_done":
@@ -908,9 +1062,17 @@ class FilePilotApp:
                     restored = len(result.get("restored", []))  # type: ignore[union-attr]
                     errors = result.get("errors", [])  # type: ignore[union-attr]
                     self.status_key = "status_done"
-                    self.status_detail = f"{self.t('undo_done').format(count=restored)} · {len(errors)} warnings" if result.get("journal_id") else self.t("undo_none")  # type: ignore[union-attr]
+                    if restored and errors:
+                        summary = self.t("undo_partial").format(restored=restored, errors=len(errors))
+                    elif restored:
+                        summary = self.t("undo_done").format(count=restored)
+                    elif not result.get("journal_id"):
+                        summary = self.t("undo_none")
+                    else:
+                        summary = self.t("move_none")
+                    self.status_detail = ""
                     self._render()
-                    messagebox.showinfo(self._display(self.t("status_done")), self._display(self.status_detail), parent=self.root)
+                    self._message_dialog(self.t("status_done"), summary, kind="warning" if errors else "info")
                     if restored:
                         self.start_scan(silent=True)
                 elif event == "error":
@@ -920,7 +1082,7 @@ class FilePilotApp:
                     self.status_key = "status_error"
                     self.status_detail = ""
                     self._render()
-                    messagebox.showerror(self._display(self.t("status_error")), self._display(f"{self.t('scan_error')}\n{detail}"), parent=self.root)
+                    self._message_dialog(self.t("status_error"), self.t("operation_error"), details=str(detail), kind="error")
         except queue.Empty:
             pass
         self.root.after(100, self._process_events)

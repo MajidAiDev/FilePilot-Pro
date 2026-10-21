@@ -17,7 +17,7 @@ from typing import Callable, Iterable
 
 APP_DIR_NAME = "FilePilot"
 JOURNAL_DIR_NAME = "journals"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 CATEGORY_EXTENSIONS: dict[str, set[str]] = {
     "Images": {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".svg", ".heic", ".ico"},
@@ -342,6 +342,20 @@ def apply_organize_plan(
     temp_path.write_text(json.dumps(journal, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_path.replace(path)
     return OperationResult(journal_id=journal_id, moved=moved, errors=errors, journal_path=str(path))
+
+
+def has_undoable_organization() -> bool:
+    """Return whether a previous organization operation has files to restore."""
+    for journal_path in sorted(journal_dir().glob("organize-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if journal.get("undone") or journal.get("operation") != "organize_move":
+            continue
+        if journal.get("moved"):
+            return True
+    return False
 
 
 def undo_latest_organization() -> dict[str, object]:

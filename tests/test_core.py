@@ -130,6 +130,19 @@ class TestFilePilotCore(unittest.TestCase):
         self.assertEqual((self.root / "image.png").read_bytes(), b"new file created later")
         self.assertTrue(Path(result.journal_path).exists())
 
+
+    def test_has_undoable_organization_tracks_only_unrestored_moves(self):
+        (self.root / "notes.txt").write_text("notes", encoding="utf-8")
+        journal_path = self.root / "journals"
+        journal_path.mkdir()
+        with patch.object(core, "journal_dir", return_value=journal_path):
+            self.assertFalse(core.has_undoable_organization())
+            result = core.apply_organize_plan(core.build_organize_plan(self.root))
+            self.assertTrue(core.has_undoable_organization())
+            undo = core.undo_latest_organization()
+            self.assertEqual(len(undo["restored"]), 1)
+            self.assertFalse(core.has_undoable_organization())
+
     def test_export_json_csv_and_html(self):
         (self.root / "unsafe&name.txt").write_text("sample", encoding="utf-8")
         report = core.scan_directory(self.root)

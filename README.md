@@ -4,7 +4,7 @@
 
 FilePilot is built with Python and Tkinter. The first release targets Windows desktop use and processes files locally. It does not upload files or hashes to an online service.
 
-- **Version:** 1.0.6
+- **Version:** 1.0.7
 - **Interface:** English and Persian
 - **Core:** Python standard library + Tkinter
 - **Optional Persian/RTL rendering:** `arabic-reshaper` and `python-bidi` (installed by `install_dependencies.bat`)
@@ -171,10 +171,20 @@ For custom desktop tools, local workflow automation, file-processing utilities, 
 The organization and undo confirmations now use an in-app Tk dialog rather than a native Windows message box. This avoids double-processing Persian right-to-left text. The organization confirmation presents the move count as a separate numeric value, shows the selected folder path, explains that files are moved rather than deleted, and defaults to cancel/No. Pressing Escape or closing the dialog cancels the operation.
 
 
-## Version 1.0.6 RTL confirmation readability
+## Version 1.0.7 RTL confirmation readability
 
 - Shortened Persian organizer and confirmation copy to avoid long shaped strings wrapping in Tk.
 - Removed trailing punctuation from short Persian safety lines to prevent punctuation displacement in RTL display.
 - Kept file counts and source paths in separate widgets with their native left-to-right order.
 - Persian footer status no longer combines translated status text with Latin progress details and punctuation.
 - Confirmation dialog remains safe by default: No, Escape, and window close cancel the operation.
+
+
+## Version 1.0.7 interaction and RTL fixes
+
+- Localized labels are wrapped in their logical text order before RTL shaping to avoid Tk wrapping already-reordered Persian text.
+- Sidebar buttons no longer mix icon glyphs and Persian in the same bidi text string.
+- Safe Organizer controls visibly disable while a scan or file operation is running.
+- Empty previews and missing undo history now produce explicit, localized messages instead of appearing to do nothing.
+- Organization, undo, export and operation error messages use an in-app dialog; file paths and technical details are kept in a separate left-to-right field.
+- GUI smoke tests exercise preview, apply, undo, busy-state button disabling, and confirmation/message dialog controls when Tk can create a display.
