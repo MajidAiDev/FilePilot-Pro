@@ -1,0 +1,1 @@
+This sample is nested one level down. The scanner includes nested files, but the organizer's first version only proposes moves for files directly inside the selected folder.

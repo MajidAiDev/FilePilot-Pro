@@ -1,0 +1,5 @@
+{
+  "project": "FilePilot demo dataset",
+  "purpose": "Demonstrate inventory, categorization, duplicate detection, and exports",
+  "contains_personal_data": false
+}

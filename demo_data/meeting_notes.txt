@@ -1,0 +1,4 @@
+FilePilot demo sample
+
+This is a safe example text file used to demonstrate file inventory and organization.
+It contains no personal information.
